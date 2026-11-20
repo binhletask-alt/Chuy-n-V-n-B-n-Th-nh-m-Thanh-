@@ -243,20 +243,28 @@ async function generateSingleChunkAudio(
   const primaryModel = modelName === 'gemini-3.8-flash-lite-tts' ? 'gemini-3.8-flash-tts' : modelName;
   const secondaryModel = primaryModel === 'gemini-3.8-flash-tts' ? 'gemini-3.8-flash-lite-tts' : 'gemini-3.8-flash-tts';
 
-  try {
-    return await callGeminiTtsModel(ai, text, voiceName, stylePrompt, primaryModel);
-  } catch (err: any) {
-    const errMsg = err?.message || String(err);
-    if (errMsg.includes('429') || errMsg.toLowerCase().includes('quota') || errMsg.toLowerCase().includes('exhausted') || errMsg.includes('503')) {
-      console.warn(`Model ${primaryModel} reached limit or unavailable. Retrying with ${secondaryModel}...`);
+  const isRetryable = (msg: string) =>
+    msg.includes('429') || msg.includes('503') || /quota|exhausted|rate limit|unavailable|high demand/i.test(msg);
+
+  // Free-tier TTS allows only a few requests per minute: on a limit error try the other
+  // model, then wait (Gemini's suggested retry delay, else 20s) and try again, so long
+  // texts finish in full instead of failing halfway.
+  const MAX_ROUNDS = 5;
+  for (let round = 1; ; round++) {
+    let lastErr: any;
+    for (const model of [primaryModel, secondaryModel]) {
       try {
-        return await callGeminiTtsModel(ai, text, voiceName, stylePrompt, secondaryModel);
-      } catch (err2: any) {
-        console.error(`Both models failed:`, err2);
-        throw err2;
+        return await callGeminiTtsModel(ai, text, voiceName, stylePrompt, model);
+      } catch (err: any) {
+        lastErr = err;
+        if (!isRetryable(err?.message || String(err))) throw err;
+        console.warn(`Model ${model} reached limit or unavailable (round ${round}).`);
       }
     }
-    throw err;
+    if (round >= MAX_ROUNDS) throw lastErr;
+    const hint = String(lastErr?.message || '').match(/retry(?:Delay)?\D{0,12}?([\d.]+)\s*s/i);
+    const waitMs = Math.min(65_000, (hint ? Number(hint[1]) + 1 : 20) * 1000);
+    await new Promise((r) => setTimeout(r, waitMs));
   }
 }
 
@@ -448,7 +456,7 @@ app.post('/api/tts/generate', async (req, res) => {
     } else {
       // Multiple chunks: parallel batch execution with concurrency limit
       const pcmChunks: Buffer[] = [];
-      const BATCH_SIZE = 4; // parallel requests at a time for optimal latency
+      const BATCH_SIZE = 1; // sequential: free-tier TTS rate limit rejects parallel requests
 
       for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
         const batch = chunks.slice(i, i + BATCH_SIZE);
@@ -850,7 +858,7 @@ app.post('/api/v1/tts', verifyApiKey, async (req, res) => {
         wavBuffer = await generateSingleChunkAudio(ai, chunks[0], chosenVoice, stylePrompt, 'gemini-3.8-flash-lite-tts');
       } else {
         const pcmChunks: Buffer[] = [];
-        const BATCH_SIZE = 4;
+        const BATCH_SIZE = 1; // sequential: see note above
         for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
           const batch = chunks.slice(i, i + BATCH_SIZE);
           const results = await Promise.all(
