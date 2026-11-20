@@ -84,6 +84,9 @@ const getGeminiClient = () => {
 
 const formatErrorMessage = (err: any): string => {
   const msg = err?.message || String(err);
+  if (/PerDay/i.test(msg)) {
+    return 'Đã hết lượt tạo giọng miễn phí trong ngày của Gemini API key. Vui lòng thử lại vào ngày mai hoặc bật thanh toán cho API key.';
+  }
   if (msg.includes('429') || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('rate limit')) {
     return 'Hệ thống đang chịu tải hoặc giới hạn tần suất yêu cầu AI Studio. Vui lòng thử lại sau vài giây.';
   }
@@ -261,8 +264,10 @@ async function generateSingleChunkAudio(
         console.warn(`Model ${model} reached limit or unavailable (round ${round}).`);
       }
     }
-    if (round >= MAX_ROUNDS) throw lastErr;
-    const hint = String(lastErr?.message || '').match(/retry(?:Delay)?\D{0,12}?([\d.]+)\s*s/i);
+    const lastMsg = String(lastErr?.message || '');
+    // Daily quota (PerDay) won't reset for hours: fail now instead of waiting in vain.
+    if (round >= MAX_ROUNDS || /PerDay/i.test(lastMsg)) throw lastErr;
+    const hint = lastMsg.match(/retry(?:Delay)?\D{0,12}?([\d.]+)\s*s/i);
     const waitMs = Math.min(65_000, (hint ? Number(hint[1]) + 1 : 20) * 1000);
     await new Promise((r) => setTimeout(r, waitMs));
   }
